@@ -86,9 +86,11 @@ func (s *GameplayScene) Update(manager scene.ManagerInterface) (scene.Transition
 func (s *GameplayScene) Draw(screen *ebiten.Image) {
 	// Get the current renderable state from the game logic
 	renderState := s.gameData.GetState()
+	// Get assets from the scene manager
+	assets := s.sceneMgr.GetAssets()
 
-	// Use the render package to draw everything
-	render.DrawGame(screen, renderState)
+	// Use the render package to draw everything, passing assets
+	render.DrawGame(screen, renderState, assets)
 
 	// Draw Pause overlay if paused
 	if s.gameData.IsPaused {

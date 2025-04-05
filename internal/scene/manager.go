@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"log"
 
-	"snake-game/internal/game"  // Import our core game logic
-	"snake-game/internal/input" // Import the input package
+	"snake-game/internal/assets" // Import assets package
+	"snake-game/internal/game"   // Import our core game logic
+	"snake-game/internal/input"  // Import the input package
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
@@ -22,17 +23,25 @@ type Manager struct {
 	screenHeight      int
 	gameData          *game.Game                     // Shared game state data
 	inputManager      *input.Manager                 // Add input manager instance
+	assetManager      *assets.Manager                // Add asset manager instance
 	sceneConstructors map[SceneType]SceneConstructor // Map to store scene constructors
 	// Add asset managers, input managers etc. here if needed globally
 }
 
-// NewManager creates a new scene manager.
+// NewManager creates a new scene manager and loads assets.
 func NewManager(screenWidth, screenHeight int) *Manager {
+	// Load assets first
+	assetMgr, err := assets.NewManager()
+	if err != nil {
+		log.Fatalf("Failed to initialize asset manager: %v", err)
+	}
+
 	m := &Manager{
 		screenWidth:       screenWidth,
 		screenHeight:      screenHeight,
 		gameData:          game.NewGame(),     // Initialize the core game data
 		inputManager:      input.NewManager(), // Initialize the input manager
+		assetManager:      assetMgr,           // Store the loaded assets
 		sceneConstructors: make(map[SceneType]SceneConstructor),
 	}
 	// Scenes must be registered before being used.
@@ -141,6 +150,11 @@ func (m *Manager) GetWindowSize() (int, int) {
 // Scenes can call this via the ManagerInterface.
 func (m *Manager) GetInputManager() *input.Manager {
 	return m.inputManager
+}
+
+// GetAssets returns the shared asset manager.
+func (m *Manager) GetAssets() *assets.Manager {
+	return m.assetManager
 }
 
 // --- Placeholder Scene --- (Keep for GameOver/Pause for now)

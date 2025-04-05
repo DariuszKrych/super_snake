@@ -1,8 +1,9 @@
 package scene
 
 import (
-	"snake-game/internal/game"  // Import our game logic package
-	"snake-game/internal/input" // Import input package
+	"snake-game/internal/assets" // Import assets
+	"snake-game/internal/game"   // Import our game logic package
+	"snake-game/internal/input"  // Import input package
 
 	"github.com/hajimehoshi/ebiten/v2"
 )
@@ -32,6 +33,7 @@ type ManagerInterface interface {
 	GoTo(transition Transition)
 	GetWindowSize() (int, int)
 	GetInputManager() *input.Manager
+	GetAssets() *assets.Manager
 	// Add methods for accessing shared resources like assets if needed
 }
 

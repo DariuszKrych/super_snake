@@ -2,10 +2,12 @@ package render
 
 import (
 	"image/color"
+	"math"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 
+	"snake-game/internal/assets"
 	"snake-game/internal/game"
 )
 
@@ -26,18 +28,37 @@ var (
 	foodSlowColor     = color.RGBA{R: 0, G: 191, B: 255, A: 255} // Deep Sky Blue
 )
 
-// DrawGame renders the entire game state.
-func DrawGame(screen *ebiten.Image, state game.RenderableState) {
+// DrawGame renders the entire game state using assets.
+func DrawGame(screen *ebiten.Image, state game.RenderableState, assets *assets.Manager) {
 	// screenWidth, screenHeight := screen.Size() // Remove this line
 
 	// 1. Draw Background
-	screen.Fill(bgColor)
+	if assets.Background != nil {
+		// Basic tiling or stretching - adjust as needed
+		bgWidth, bgHeight := assets.Background.Size()
+		screenWidth, screenHeight := screen.Size()
+		// op := &ebiten.DrawImageOptions{} // Remove this unused declaration
+		// Simple stretch example:
+		// op.GeoM.Scale(float64(screenWidth)/float64(bgWidth), float64(screenHeight)/float64(bgHeight))
+		// Tiling example:
+		maxX := screenWidth / bgWidth
+		maxY := screenHeight / bgHeight
+		for y := 0; y <= maxY; y++ {
+			for x := 0; x <= maxX; x++ {
+				op := &ebiten.DrawImageOptions{}
+				op.GeoM.Translate(float64(x*bgWidth), float64(y*bgHeight))
+				screen.DrawImage(assets.Background, op)
+			}
+		}
+	} else {
+		screen.Fill(bgColor) // Fallback background color
+	}
 
 	// 2. Draw Grid (Optional, can be subtle)
 	// drawGrid(screen, state.GridWidth, state.GridHeight, screenWidth, screenHeight)
 
 	// 3. Draw Walls/Boundaries
-	drawWalls(screen, state.GridWidth, state.GridHeight)
+	drawWalls(screen, state.GridWidth, state.GridHeight, assets)
 
 	// 4. Draw Food (Iterate over slice)
 	// if state.Food != nil { // Old check
@@ -45,20 +66,20 @@ func DrawGame(screen *ebiten.Image, state game.RenderableState) {
 	// }
 	for _, food := range state.FoodItems {
 		if food != nil { // Check if pointer is valid
-			drawFood(screen, *food) // Dereference pointer to pass game.Food
+			drawFood(screen, *food, assets) // Dereference pointer to pass game.Food
 		}
 	}
 
 	// 5. Draw Enemy Snakes
 	for _, enemy := range state.EnemySnakes {
 		if enemy != nil {
-			drawSnake(screen, *enemy, enemyHeadColor, enemyBodyColor)
+			drawSnake(screen, *enemy, assets)
 		}
 	}
 
 	// 6. Draw Player Snake (drawn last to be on top)
 	if state.PlayerSnake != nil {
-		drawSnake(screen, *state.PlayerSnake, playerHeadColor, playerBodyColor)
+		drawSnake(screen, *state.PlayerSnake, assets)
 	}
 
 	// 7. Draw HUD (Score, etc.) - To be implemented later
@@ -80,77 +101,130 @@ func drawGrid(screen *ebiten.Image, gridW, gridH, screenW, screenH int) {
 }
 
 // drawWalls draws the boundaries of the game area.
-func drawWalls(screen *ebiten.Image, gridW, gridH int) {
-	thickness := float32(2) // Wall thickness
+func drawWalls(screen *ebiten.Image, gridW, gridH int, assets *assets.Manager) {
+	// Use wall sprite if available, otherwise fallback to colored rects
+	if assets.Wall != nil {
+		// TODO: Implement drawing walls using the assets.Wall sprite
+		// This might involve drawing tiles or stretching the sprite.
+		// For now, fallback to simple rects.
+		drawWallRects(screen, gridW, gridH)
+	} else {
+		drawWallRects(screen, gridW, gridH)
+	}
+}
+
+// drawWallRects draws simple rectangles for walls (fallback).
+func drawWallRects(screen *ebiten.Image, gridW, gridH int) {
+	thickness := float32(2)
 	w := float32(gridW * GridCellSize)
 	h := float32(gridH * GridCellSize)
-
-	// Top
 	vector.DrawFilledRect(screen, 0, 0, w, thickness, wallColor, false)
-	// Bottom
 	vector.DrawFilledRect(screen, 0, h-thickness, w, thickness, wallColor, false)
-	// Left
 	vector.DrawFilledRect(screen, 0, 0, thickness, h, wallColor, false)
-	// Right
 	vector.DrawFilledRect(screen, w-thickness, 0, thickness, h, wallColor, false)
 }
 
-// drawSnake draws a single snake.
-func drawSnake(screen *ebiten.Image, s game.Snake, headClr, bodyClr color.Color) {
-	if len(s.Body) == 0 {
-		return
+// drawSnake draws a single snake using sprites.
+func drawSnake(screen *ebiten.Image, s game.Snake, assets *assets.Manager) {
+	if len(s.Body) == 0 || assets.SnakeBody == nil || assets.SnakeHead == nil {
+		return // Cannot draw without assets or body
 	}
 
-	// Draw body segments first
+	bodyW, bodyH := assets.SnakeBody.Size()
+	headW, headH := assets.SnakeHead.Size()
+
+	// --- Draw Body ---
 	for i := 1; i < len(s.Body); i++ {
 		segment := s.Body[i]
-		vector.DrawFilledRect(
-			screen,
-			float32(segment.X*GridCellSize)+1, // +1, -2 for slight padding
-			float32(segment.Y*GridCellSize)+1,
-			float32(GridCellSize-2),
-			float32(GridCellSize-2),
-			bodyClr,
-			false,
-		)
+		prevSegment := s.Body[i-1] // Get the segment in front of this one
+
+		op := &ebiten.DrawImageOptions{}
+		// Center the sprite within the grid cell
+		tx := float64(segment.X*GridCellSize) + float64(GridCellSize-bodyW)/2.0
+		ty := float64(segment.Y*GridCellSize) + float64(GridCellSize-bodyH)/2.0
+
+		// --- Determine Body Rotation ---
+		var bodyAngle float64 = 0
+		if prevSegment.X == segment.X { // Moving vertically (previous is above or below)
+			bodyAngle = math.Pi / 2 // Rotate 90 degrees
+		} // Else: Moving horizontally, angle remains 0 (assuming horizontal sprite)
+
+		// Apply rotation if needed
+		if bodyAngle != 0 {
+			centerX := float64(bodyW) / 2.0
+			centerY := float64(bodyH) / 2.0
+			op.GeoM.Translate(-centerX, -centerY)
+			op.GeoM.Rotate(bodyAngle)
+			op.GeoM.Translate(centerX, centerY)
+		}
+
+		// Apply translation
+		op.GeoM.Translate(tx, ty)
+		// TODO: Add rotation for body segments based on previous segment? (Advanced) // Already doing basic rotation
+		screen.DrawImage(assets.SnakeBody, op)
 	}
 
-	// Draw head last (on top)
+	// --- Draw Head ---
 	head := s.Body[0]
-	vector.DrawFilledRect(
-		screen,
-		float32(head.X*GridCellSize)+1,
-		float32(head.Y*GridCellSize)+1,
-		float32(GridCellSize-2),
-		float32(GridCellSize-2),
-		headClr,
-		false,
-	)
+	op := &ebiten.DrawImageOptions{}
+	// Calculate translation to center the head sprite
+	tx := float64(head.X*GridCellSize) + float64(GridCellSize-headW)/2.0
+	ty := float64(head.Y*GridCellSize) + float64(GridCellSize-headH)/2.0
+
+	// Calculate rotation based on direction
+	var angle float64
+	switch s.Direction {
+	case game.DirUp:
+		angle = -math.Pi / 2 // -90 degrees
+	case game.DirDown:
+		angle = math.Pi / 2 // 90 degrees
+	case game.DirLeft:
+		angle = math.Pi // 180 degrees
+	case game.DirRight:
+		angle = 0 // Assume head sprite faces right by default
+	default:
+		angle = 0 // Or use previous direction?
+	}
+
+	// Apply rotation around the center of the sprite
+	centerX := float64(headW) / 2.0
+	centerY := float64(headH) / 2.0
+	op.GeoM.Translate(-centerX, -centerY) // Move rotation center to origin
+	op.GeoM.Rotate(angle)                 // Rotate
+	op.GeoM.Translate(centerX, centerY)   // Move back
+
+	// Apply translation to position the head on the grid
+	op.GeoM.Translate(tx, ty)
+
+	screen.DrawImage(assets.SnakeHead, op)
 }
 
-// drawFood draws a food item.
-func drawFood(screen *ebiten.Image, f game.Food) {
-	var clr color.Color
+// drawFood draws a food item using sprites.
+func drawFood(screen *ebiten.Image, f game.Food, assets *assets.Manager) {
+	var img *ebiten.Image
 	switch f.Type {
 	case game.FoodTypeStandard:
-		clr = foodStandardColor
+		img = assets.FoodStandard
 	case game.FoodTypeSpeedUp:
-		clr = foodSpeedColor
+		img = assets.FoodSpeedUp
 	case game.FoodTypeSlowDown:
-		clr = foodSlowColor
+		img = assets.FoodSlowDown
 	default:
-		clr = color.White // Fallback
+		return // Don't draw unknown food types
 	}
 
-	vector.DrawFilledRect(
-		screen,
-		float32(f.Pos.X*GridCellSize)+2, // +2, -4 for slightly smaller food
-		float32(f.Pos.Y*GridCellSize)+2,
-		float32(GridCellSize-4),
-		float32(GridCellSize-4),
-		clr,
-		false,
-	)
+	if img == nil {
+		return // Don't draw if asset is missing
+	}
+
+	imgW, imgH := img.Size()
+	op := &ebiten.DrawImageOptions{}
+	// Center the sprite
+	tx := float64(f.Pos.X*GridCellSize) + float64(GridCellSize-imgW)/2.0
+	ty := float64(f.Pos.Y*GridCellSize) + float64(GridCellSize-imgH)/2.0
+	op.GeoM.Translate(tx, ty)
+
+	screen.DrawImage(img, op)
 }
 
 // TODO: drawHUD function
