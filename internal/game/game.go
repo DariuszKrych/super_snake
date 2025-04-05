@@ -1,6 +1,7 @@
 package game
 
 import (
+	// Need heap for astar.go (if not already imported)
 	"log"
 	"math/rand"
 	"time"
@@ -55,6 +56,7 @@ type Snake struct {
 	SpeedEffectEndTime time.Time   // Track when the speed boost ends
 	IsPlayer           bool        // Flag to distinguish player snake
 	MoveProgress       float64     // How far into the current grid move (0.0 to 1.0)
+	currentPath        []Position  // Path for AI snakes
 	// Add other snake-specific properties if needed (e.g., color for rendering)
 }
 
@@ -128,11 +130,12 @@ func (g *Game) Reset() {
 		SpeedEffectEndTime: time.Time{},
 		IsPlayer:           true,
 		MoveProgress:       0.0,
+		currentPath:        nil,
 	}
 
 	// Initialize Enemies
-	g.EnemySnakes = make([]*Snake, 0, MaxEnemySnakes) // Use Max for capacity
-	for i := 0; i < NumEnemySnakes; i++ {             // Start with initial number
+	g.EnemySnakes = make([]*Snake, 0, MaxEnemySnakes)
+	for i := 0; i < NumEnemySnakes; i++ {
 		enemy := g.createEnemy(occupied)
 		if enemy != nil {
 			g.EnemySnakes = append(g.EnemySnakes, enemy)
@@ -201,6 +204,7 @@ func (g *Game) createEnemy(occupied map[Position]bool) *Snake {
 				SpeedEffectEndTime: time.Time{},
 				IsPlayer:           false,
 				MoveProgress:       0.0,
+				currentPath:        nil,
 			}
 		}
 		attempts++
@@ -405,63 +409,206 @@ func (g *Game) Update(deltaTime float64) error {
 	return nil
 }
 
-// updateEnemyAI sets the NextDir for an enemy snake (placeholder logic).
+// updateEnemyAI uses A* pathfinding to set NextDir.
 func (g *Game) updateEnemyAI(s *Snake) {
-	// Very basic AI: Try to move towards the first food item.
-	// Does not avoid obstacles yet!
-	if len(g.FoodItems) > 0 && g.FoodItems[0] != nil {
-		target := g.FoodItems[0].Pos
-		head := s.Body[0]
-		currentDir := s.Direction
-
-		// Determine desired direction (simplified)
-		var desiredDir Direction
-		if target.X > head.X && currentDir != DirLeft {
-			desiredDir = DirRight
-		} else if target.X < head.X && currentDir != DirRight {
-			desiredDir = DirLeft
-		} else if target.Y > head.Y && currentDir != DirUp {
-			desiredDir = DirDown
-		} else if target.Y < head.Y && currentDir != DirDown {
-			desiredDir = DirUp
-		} else {
-			// If already aligned on one axis, move on the other, or keep current
-			if target.Y != head.Y && currentDir != DirUp && currentDir != DirDown {
-				if target.Y > head.Y {
-					desiredDir = DirDown
-				} else {
-					desiredDir = DirUp
-				}
-			} else if target.X != head.X && currentDir != DirLeft && currentDir != DirRight {
-				if target.X > head.X {
-					desiredDir = DirRight
-				} else {
-					desiredDir = DirLeft
-				}
-			} else {
-				desiredDir = currentDir // Keep going if blocked or unsure
-			}
-		}
-
-		// Basic anti-reversal check
-		if (desiredDir == DirUp && currentDir == DirDown) ||
-			(desiredDir == DirDown && currentDir == DirUp) ||
-			(desiredDir == DirLeft && currentDir == DirRight) ||
-			(desiredDir == DirRight && currentDir == DirLeft) {
-			// If desired move is direct reverse, try to turn perpendicular instead (simple avoidance)
-			if currentDir == DirUp || currentDir == DirDown {
-				desiredDir = DirLeft
-			} else {
-				desiredDir = DirUp
-			}
-			// TODO: Need better obstacle check here
-		}
-
-		s.NextDir = desiredDir
-	} else {
-		// No food? Move randomly or keep going (for now, keep going)
-		s.NextDir = s.Direction
+	if len(s.Body) == 0 {
+		return
 	}
+	head := s.Body[0]
+
+	// --- Path Following ---
+	if len(s.currentPath) > 0 {
+		// Check if the next step in the path is the current head position
+		// This can happen if the path calculation was slightly delayed
+		if s.currentPath[0] == head {
+			s.currentPath = s.currentPath[1:] // Pop the current head position
+			if len(s.currentPath) == 0 {
+				// Reached end of path, need to recalculate
+				goto recalculate // Use goto for clarity in this state machine
+			}
+		}
+
+		// Set NextDir based on the first step in the existing path
+		nextStep := s.currentPath[0]
+		newDir := directionFromTo(head, nextStep)
+		if newDir != DirNone {
+			// Basic check: don't immediately reverse into self
+			canMove := true
+			if len(s.Body) > 1 {
+				neck := s.Body[1]
+				potentialNextHead := head
+				switch newDir {
+				case DirUp:
+					potentialNextHead.Y--
+				case DirDown:
+					potentialNextHead.Y++
+				case DirLeft:
+					potentialNextHead.X--
+				case DirRight:
+					potentialNextHead.X++
+				}
+				if potentialNextHead == neck {
+					canMove = false
+					// log.Printf("AI %p avoiding neck collision by recalculating", s)
+					s.currentPath = nil // Invalidate path, force recalculation
+					goto recalculate
+				}
+			}
+			if canMove {
+				s.NextDir = newDir
+				return // Successfully following path
+			}
+		}
+	}
+
+recalculate: // Label for jumping to path recalculation
+	// --- Path Recalculation ---
+	targetFood := g.findClosestFood(head)
+	if targetFood == nil {
+		g.setRandomEnemyDirection(s) // No food, move randomly
+		return
+	}
+
+	// Build obstacle map
+	obstacles := g.buildObstacleMap(s) // Exclude self head
+
+	// Find path
+	path := findPath(head, targetFood.Pos, GridWidth, GridHeight, obstacles)
+
+	if path != nil && len(path) > 0 {
+		s.currentPath = path
+		// Set direction based on the first step
+		newDir := directionFromTo(head, path[0])
+		if newDir != DirNone {
+			s.NextDir = newDir
+		} else {
+			// Should not happen if path is valid
+			log.Printf("Warning: A* path resulted in invalid first step for AI %p", s)
+			g.setRandomEnemyDirection(s) // Fallback
+		}
+	} else {
+		// No path found (food unreachable or blocked)
+		// log.Printf("AI %p could not find path to food at %v", s, targetFood.Pos)
+		g.setRandomEnemyDirection(s) // Fallback: Move randomly but avoid obstacles
+	}
+}
+
+// findClosestFood finds the nearest food item to a given position.
+func (g *Game) findClosestFood(pos Position) *Food {
+	var closestFood *Food = nil
+	minDist := -1
+
+	for _, food := range g.FoodItems {
+		if food == nil {
+			continue
+		}
+		dist := heuristic(pos, food.Pos) // Manhattan distance
+		if closestFood == nil || dist < minDist {
+			minDist = dist
+			closestFood = food
+		}
+	}
+	return closestFood
+}
+
+// buildObstacleMap creates a map of all occupied cells for pathfinding.
+// Includes wall padding and all snake segments except the head of the snake `self`.
+func (g *Game) buildObstacleMap(self *Snake) map[Position]bool {
+	obstacles := make(map[Position]bool)
+
+	// Player Snake Body (Include head now for avoidance)
+	if g.PlayerSnake != nil {
+		// for i, seg := range g.PlayerSnake.Body {
+		// 	if i > 0 { // Skip player head
+		// 		obstacles[seg] = true
+		// 	}
+		// }
+		for _, seg := range g.PlayerSnake.Body {
+			obstacles[seg] = true // Include player head as obstacle
+		}
+	}
+
+	// Other Enemy Snakes (include head and body)
+	for _, enemy := range g.EnemySnakes {
+		if enemy != nil && enemy != self {
+			for _, seg := range enemy.Body {
+				obstacles[seg] = true
+			}
+		}
+	}
+
+	// Self Body (excluding head)
+	if self != nil {
+		for i, seg := range self.Body {
+			if i > 0 { // Still exclude self head
+				obstacles[seg] = true
+			}
+		}
+	}
+
+	// TODO: Add walls as obstacles explicitly if needed for A*?
+	// Currently relies on isValid check, might be slightly less efficient.
+
+	return obstacles
+}
+
+// setRandomEnemyDirection chooses a valid random direction, avoiding immediate obstacles.
+func (g *Game) setRandomEnemyDirection(s *Snake) {
+	head := s.Body[0]
+	possibleDirs := []Direction{DirUp, DirDown, DirLeft, DirRight}
+	validDirs := []Direction{}
+
+	obstacles := g.buildObstacleMap(s) // Need current obstacles
+
+	for _, dir := range possibleDirs {
+		// Prevent immediate reversal
+		if (dir == DirUp && s.Direction == DirDown) || (dir == DirDown && s.Direction == DirUp) ||
+			(dir == DirLeft && s.Direction == DirRight) || (dir == DirRight && s.Direction == DirLeft) {
+			continue
+		}
+
+		// Check if the next cell is valid and not an obstacle
+		nextPos := head
+		switch dir {
+		case DirUp:
+			nextPos.Y--
+		case DirDown:
+			nextPos.Y++
+		case DirLeft:
+			nextPos.X--
+		case DirRight:
+			nextPos.X++
+		}
+		if isValid(nextPos, GridWidth, GridHeight) && !obstacles[nextPos] {
+			validDirs = append(validDirs, dir)
+		}
+	}
+
+	if len(validDirs) > 0 {
+		s.NextDir = validDirs[rand.Intn(len(validDirs))]
+	} else {
+		// Nowhere to go? Keep current direction (will likely collide)
+		s.NextDir = s.Direction
+		// log.Printf("AI %p trapped! No valid random move.", s)
+	}
+	s.currentPath = nil // Clear path as we are moving randomly
+}
+
+// directionFromTo calculates the direction needed to move from pos 'from' to pos 'to'.
+func directionFromTo(from, to Position) Direction {
+	if to.Y < from.Y {
+		return DirUp
+	}
+	if to.Y > from.Y {
+		return DirDown
+	}
+	if to.X < from.X {
+		return DirLeft
+	}
+	if to.X > from.X {
+		return DirRight
+	}
+	return DirNone // Should not happen for adjacent cells
 }
 
 // updateSnakeProgress handles movement progress and finalization for a single snake
@@ -476,11 +623,15 @@ func (g *Game) updateSnakeProgress(s *Snake, deltaTime float64) {
 
 	// Did the snake complete one or more grid moves this frame?
 	for s.MoveProgress >= 1.0 {
-		s.MoveProgress -= 1.0 // Consume one full grid move
+		s.MoveProgress -= 1.0
+		// Clear the path step we just took *if* we were following one
+		if !s.IsPlayer && len(s.currentPath) > 0 && s.currentPath[0] == s.Body[0] { // Compare with head *before* updating Body
+			// Pop the step we just completed
+			s.currentPath = s.currentPath[1:]
+		}
 
 		// 1. Finalize the move for this step
 		// Store current body as previous body (needs a deep copy)
-		// s.PrevBody = s.Body // Incorrect: this assigns the slice header, not data
 		s.PrevBody = make([]Position, len(s.Body))
 		copy(s.PrevBody, s.Body)
 
