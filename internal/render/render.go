@@ -124,78 +124,110 @@ func drawWallRects(screen *ebiten.Image, gridW, gridH int) {
 	vector.DrawFilledRect(screen, w-thickness, 0, thickness, h, wallColor, false)
 }
 
-// drawSnake draws a single snake using sprites.
+// drawSnake draws a single snake using sprites with interpolation.
 func drawSnake(screen *ebiten.Image, s game.Snake, assets *assets.Manager) {
-	if len(s.Body) == 0 || assets.SnakeBody == nil || assets.SnakeHead == nil {
-		return // Cannot draw without assets or body
+	if len(s.Body) == 0 || len(s.PrevBody) == 0 || len(s.Body) != len(s.PrevBody) || assets.SnakeBody == nil || assets.SnakeHead == nil {
+		// log.Printf("DrawSnake skip: BodyLen=%d, PrevBodyLen=%d, BodyAsset=%v, HeadAsset=%v", len(s.Body), len(s.PrevBody), assets.SnakeBody, assets.SnakeHead)
+		return // Cannot draw without assets or consistent body/prevBody
 	}
 
 	bodyW, bodyH := assets.SnakeBody.Size()
 	headW, headH := assets.SnakeHead.Size()
+	progress := s.MoveProgress // How far we are into the current move (0.0 to < 1.0)
+
+	// Helper function for linear interpolation
+	lerp := func(a, b float64, t float64) float64 {
+		return a + (b-a)*t
+	}
 
 	// --- Draw Body ---
 	for i := 1; i < len(s.Body); i++ {
+		// Current logical position
 		segment := s.Body[i]
-		prevSegment := s.Body[i-1] // Get the segment in front of this one
+		// Previous logical position
+		prevSegmentPos := s.PrevBody[i]
+
+		// Interpolated visual position
+		visX := lerp(float64(prevSegmentPos.X), float64(segment.X), progress)
+		visY := lerp(float64(prevSegmentPos.Y), float64(segment.Y), progress)
+
+		// Segment in front of this one (for rotation reference)
+		segmentInFront := s.Body[i-1]
+		prevSegmentInFront := s.PrevBody[i-1]
+		// Interpolated position of the segment in front
+		visFrontX := lerp(float64(prevSegmentInFront.X), float64(segmentInFront.X), progress)
+		visFrontY := lerp(float64(prevSegmentInFront.Y), float64(segmentInFront.Y), progress)
 
 		op := &ebiten.DrawImageOptions{}
-		// Center the sprite within the grid cell
-		tx := float64(segment.X*GridCellSize) + float64(GridCellSize-bodyW)/2.0
-		ty := float64(segment.Y*GridCellSize) + float64(GridCellSize-bodyH)/2.0
+		// Center the sprite on the *interpolated* position
+		tx := visX*float64(GridCellSize) + float64(GridCellSize-bodyW)/2.0
+		ty := visY*float64(GridCellSize) + float64(GridCellSize-bodyH)/2.0
 
-		// --- Determine Body Rotation ---
+		// --- Determine Body Rotation based on visual positions ---
 		var bodyAngle float64 = 0
-		if prevSegment.X == segment.X { // Moving vertically (previous is above or below)
+		dx := visFrontX - visX
+		dy := visFrontY - visY
+		if math.Abs(dx) < 0.01 { // Moving (close enough to) vertically
 			bodyAngle = math.Pi / 2 // Rotate 90 degrees
-		} // Else: Moving horizontally, angle remains 0 (assuming horizontal sprite)
-
-		// Apply rotation if needed
-		if bodyAngle != 0 {
-			centerX := float64(bodyW) / 2.0
-			centerY := float64(bodyH) / 2.0
-			op.GeoM.Translate(-centerX, -centerY)
-			op.GeoM.Rotate(bodyAngle)
-			op.GeoM.Translate(centerX, centerY)
+		} else if math.Abs(dy) < 0.01 { // Moving (close enough to) horizontally
+			bodyAngle = 0
+		} else {
+			// Handle diagonal movement during turns - requires corner sprites or more complex logic
+			// For now, default to horizontal or vertical based on dominant axis, or use arctan
+			bodyAngle = math.Atan2(dy, dx)
+			// If using only straight sprites, snap angle to nearest 90 degrees
+			// bodyAngle = math.Round(bodyAngle / (math.Pi / 2)) * (math.Pi / 2)
 		}
+
+		// Apply rotation
+		// (Rotation logic might need refinement depending on the sprite asset)
+		centerX := float64(bodyW) / 2.0
+		centerY := float64(bodyH) / 2.0
+		op.GeoM.Translate(-centerX, -centerY) // Center rotation point
+		op.GeoM.Rotate(bodyAngle)
+		op.GeoM.Translate(centerX, centerY) // Move back
 
 		// Apply translation
 		op.GeoM.Translate(tx, ty)
-		// TODO: Add rotation for body segments based on previous segment? (Advanced) // Already doing basic rotation
 		screen.DrawImage(assets.SnakeBody, op)
 	}
 
 	// --- Draw Head ---
 	head := s.Body[0]
-	op := &ebiten.DrawImageOptions{}
-	// Calculate translation to center the head sprite
-	tx := float64(head.X*GridCellSize) + float64(GridCellSize-headW)/2.0
-	ty := float64(head.Y*GridCellSize) + float64(GridCellSize-headH)/2.0
+	prevHead := s.PrevBody[0]
+	// Interpolated visual position
+	visX := lerp(float64(prevHead.X), float64(head.X), progress)
+	visY := lerp(float64(prevHead.Y), float64(head.Y), progress)
 
-	// Calculate rotation based on direction
+	op := &ebiten.DrawImageOptions{}
+	// Center the sprite on the interpolated position
+	tx := visX*float64(GridCellSize) + float64(GridCellSize-headW)/2.0
+	ty := visY*float64(GridCellSize) + float64(GridCellSize-headH)/2.0
+
+	// Calculate rotation based on *current logical* direction (smoother than visual delta)
 	var angle float64
 	switch s.Direction {
 	case game.DirUp:
-		angle = -math.Pi / 2 // -90 degrees
+		angle = -math.Pi / 2
 	case game.DirDown:
-		angle = math.Pi / 2 // 90 degrees
+		angle = math.Pi / 2
 	case game.DirLeft:
-		angle = math.Pi // 180 degrees
+		angle = math.Pi
 	case game.DirRight:
-		angle = 0 // Assume head sprite faces right by default
+		angle = 0
 	default:
-		angle = 0 // Or use previous direction?
+		angle = 0
 	}
 
 	// Apply rotation around the center of the sprite
 	centerX := float64(headW) / 2.0
 	centerY := float64(headH) / 2.0
-	op.GeoM.Translate(-centerX, -centerY) // Move rotation center to origin
-	op.GeoM.Rotate(angle)                 // Rotate
-	op.GeoM.Translate(centerX, centerY)   // Move back
+	op.GeoM.Translate(-centerX, -centerY)
+	op.GeoM.Rotate(angle)
+	op.GeoM.Translate(centerX, centerY)
 
-	// Apply translation to position the head on the grid
+	// Apply translation to position the head
 	op.GeoM.Translate(tx, ty)
-
 	screen.DrawImage(assets.SnakeHead, op)
 }
 

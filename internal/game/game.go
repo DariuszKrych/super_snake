@@ -3,6 +3,8 @@ package game
 import (
 	"math/rand"
 	"time"
+	// Import log for debugging if needed
+	// "log"
 )
 
 // --- Constants ---
@@ -10,7 +12,7 @@ import (
 const (
 	GridWidth         = 40
 	GridHeight        = 30
-	InitialSpeed      = 8
+	InitialSpeed      = 8 // Grid cells per second
 	SpeedIncrement    = 0.5
 	MaxSpeed          = 20
 	InitialSnakeLen   = 3
@@ -39,12 +41,14 @@ type Position struct {
 
 // Snake struct holds state for a single snake (player or AI)
 type Snake struct {
-	Body        []Position
-	Direction   Direction
-	NextDir     Direction   // Buffer for next direction input
-	SpeedFactor float64     // Multiplier for speed (1.0 = normal, >1 = faster, <1 = slower)
-	SpeedTimer  *time.Timer // Timer for temporary speed effects
-	IsPlayer    bool        // Flag to distinguish player snake
+	Body         []Position
+	PrevBody     []Position // Stores body positions from the *previous completed* move step
+	Direction    Direction
+	NextDir      Direction   // Buffer for next direction input
+	SpeedFactor  float64     // Multiplier for speed (1.0 = normal, >1 = faster, <1 = slower)
+	SpeedTimer   *time.Timer // Timer for temporary speed effects
+	IsPlayer     bool        // Flag to distinguish player snake
+	MoveProgress float64     // How far into the current grid move (0.0 to 1.0)
 	// Add other snake-specific properties if needed (e.g., color for rendering)
 }
 
@@ -73,8 +77,7 @@ type Game struct {
 	EnemySnakes       []*Snake
 	FoodItems         []*Food
 	Score             int
-	Speed             float64
-	MoveTicker        *time.Ticker
+	Speed             float64 // Base grid cells per second for player
 	IsOver            bool
 	IsPaused          bool
 	nextFoodSpawnTime time.Time // When the next food item should appear
@@ -94,18 +97,22 @@ func NewGame() *Game {
 
 // Reset initializes or resets the game state for a new round
 func (g *Game) Reset() {
-	// Initialize player snake
 	startX, startY := GridWidth/2, GridHeight/2
 	initialBody := make([]Position, InitialSnakeLen)
+	prevBody := make([]Position, InitialSnakeLen)
 	for i := 0; i < InitialSnakeLen; i++ {
-		initialBody[i] = Position{X: startX - i, Y: startY}
+		pos := Position{X: startX - i, Y: startY}
+		initialBody[i] = pos
+		prevBody[i] = pos // Initially, previous position is the same
 	}
 	g.PlayerSnake = &Snake{
-		Body:        initialBody,
-		Direction:   DirRight,
-		NextDir:     DirRight,
-		SpeedFactor: 1.0,
-		IsPlayer:    true,
+		Body:         initialBody,
+		PrevBody:     prevBody,
+		Direction:    DirRight,
+		NextDir:      DirRight,
+		SpeedFactor:  1.0,
+		IsPlayer:     true,
+		MoveProgress: 0.0, // Start not moving
 	}
 
 	// TODO: Initialize Enemy Snakes (Section 5.4)
@@ -124,17 +131,6 @@ func (g *Game) Reset() {
 
 	// Schedule the next timed spawn
 	g.scheduleNextFoodSpawn()
-
-	if g.MoveTicker != nil {
-		g.MoveTicker.Stop()
-	}
-	if g.PlayerSnake != nil && g.PlayerSnake.SpeedFactor != 0 {
-		g.MoveTicker = time.NewTicker(time.Second / time.Duration(g.Speed*g.PlayerSnake.SpeedFactor))
-	} else {
-		g.MoveTicker = time.NewTicker(time.Second / time.Duration(g.Speed))
-	}
-
-	// TODO: Reset enemy states
 }
 
 // --- Food Logic ---
@@ -230,63 +226,37 @@ func (g *Game) spawnFoodItem() {
 // --- Snake Logic ---
 
 // grow increases snake length by duplicating the tail segment
+// Needs to update both Body and PrevBody
 func (s *Snake) grow() {
 	if len(s.Body) == 0 {
-		return // Should not happen
+		return
 	}
 	tail := s.Body[len(s.Body)-1]
-	s.Body = append(s.Body, tail) // Duplicate tail segment
+	s.Body = append(s.Body, tail)
+	// Also append to PrevBody using the *current* last segment of PrevBody
+	if len(s.PrevBody) > 0 {
+		prevTail := s.PrevBody[len(s.PrevBody)-1]
+		s.PrevBody = append(s.PrevBody, prevTail)
+	} else {
+		// Handle edge case if PrevBody is empty but Body isn't (shouldn't happen)
+		s.PrevBody = append(s.PrevBody, tail) // Use Body's tail as fallback
+	}
 }
 
 // applySpeedBoost applies a temporary speed multiplier
 func (s *Snake) applySpeedBoost(factor float64, duration time.Duration) {
-	// Stop existing timer if any
 	if s.SpeedTimer != nil {
 		s.SpeedTimer.Stop()
 	}
-
 	s.SpeedFactor = factor
-	// TODO: Need to notify the main game loop to adjust the MoveTicker interval
-
 	s.SpeedTimer = time.AfterFunc(duration, func() {
 		s.SpeedFactor = 1.0
 		s.SpeedTimer = nil
-		// TODO: Notify main game loop to reset MoveTicker interval
 	})
 }
 
-// move calculates the next head position and updates the body
-// Returns true if food was eaten
-func (s *Snake) move() bool {
-	if len(s.Body) == 0 {
-		return false
-	}
-
-	// Update direction based on buffered input
-	s.Direction = s.NextDir
-
-	// Calculate new head position
-	head := s.Body[0]
-	newHead := head
-	switch s.Direction {
-	case DirUp:
-		newHead.Y--
-	case DirDown:
-		newHead.Y++
-	case DirLeft:
-		newHead.X--
-	case DirRight:
-		newHead.X++
-	}
-
-	// Update snake body: Prepend new head, remove tail (unless grown)
-	// Growth is handled separately when food is confirmed eaten
-	s.Body = append([]Position{newHead}, s.Body[:len(s.Body)-1]...)
-
-	return false // Food eating check happens in the main game update
-}
-
 // checkCollision checks if the snake's head collides with boundaries or itself
+// This is checked *only* when a move is finalized.
 func (s *Snake) checkCollision(width, height int) (hitWall bool, hitSelf bool) {
 	if len(s.Body) == 0 {
 		return false, false
@@ -310,76 +280,123 @@ func (s *Snake) checkCollision(width, height int) (hitWall bool, hitSelf bool) {
 
 // --- Game Update Logic ---
 
-// Update proceeds the game state by one tick
-func (g *Game) Update() error {
+// Update proceeds the game state by one frame
+func (g *Game) Update(deltaTime float64) error { // Accept delta time
 	if g.IsOver || g.IsPaused {
 		return nil
 	}
 
-	// Check if food needs spawning based on time interval
+	// Check timed food spawning
 	if time.Now().After(g.nextFoodSpawnTime) {
 		g.spawnFoodItem()
-		g.scheduleNextFoodSpawn() // Schedule the next one
+		g.scheduleNextFoodSpawn()
 	}
 
-	// Check the ticker to see if it's time to move player
-	select {
-	case <-g.MoveTicker.C:
-		g.updatePlayer()
-		// TODO: Update Enemy AI snakes
-	default:
-		// Not time to move yet
+	// Update Player Snake Movement Progress
+	if g.PlayerSnake != nil {
+		g.updateSnakeProgress(g.PlayerSnake, deltaTime)
 	}
 
-	// TODO: Update Enemy AI movements & checks
-	g.updateEnemies()
+	// TODO: Update Enemy AI Movement Progress
+	// for _, enemy := range g.EnemySnakes {
+	// 	g.updateSnakeProgress(enemy, deltaTime)
+	// }
 
 	return nil
 }
 
-// updatePlayer handles player snake movement and collision checks
-func (g *Game) updatePlayer() {
-	if g.PlayerSnake == nil || len(g.PlayerSnake.Body) == 0 {
+// updateSnakeProgress handles movement progress and finalization for a single snake
+func (g *Game) updateSnakeProgress(s *Snake, deltaTime float64) {
+	if len(s.Body) == 0 {
 		return
 	}
 
-	headBeforeMove := g.PlayerSnake.Body[0]
-	ateFoodIndex := -1 // Index of the food item eaten
+	// Calculate movement amount for this frame
+	moveAmount := s.SpeedFactor * g.Speed * deltaTime
+	s.MoveProgress += moveAmount
 
-	// Check food collision *before* moving the body segments
-	for i, food := range g.FoodItems {
-		if food != nil && headBeforeMove == food.Pos {
-			ateFoodIndex = i
-			g.Score += food.Points
-			if food.Effect != nil {
-				food.Effect(g.PlayerSnake)
-			}
-			break // Eat only one food per tick
+	// Did the snake complete one or more grid moves this frame?
+	for s.MoveProgress >= 1.0 {
+		s.MoveProgress -= 1.0 // Consume one full grid move
+
+		// 1. Finalize the move for this step
+		// Store current body as previous body (needs a deep copy)
+		// s.PrevBody = s.Body // Incorrect: this assigns the slice header, not data
+		s.PrevBody = make([]Position, len(s.Body))
+		copy(s.PrevBody, s.Body)
+
+		// Determine actual direction for this step
+		s.Direction = s.NextDir
+
+		// Calculate next head position
+		head := s.Body[0]
+		newHead := head
+		switch s.Direction {
+		case DirUp:
+			newHead.Y--
+		case DirDown:
+			newHead.Y++
+		case DirLeft:
+			newHead.X--
+		case DirRight:
+			newHead.X++
 		}
-	}
 
-	// Remove eaten food item (if any)
-	if ateFoodIndex != -1 {
-		g.FoodItems = append(g.FoodItems[:ateFoodIndex], g.FoodItems[ateFoodIndex+1:]...)
-		// Immediately try to spawn a replacement food item
-		g.spawnFoodItem()
-	}
+		// Check for food at the *target* position *before* updating body
+		ateFoodIndex := -1
+		for i, food := range g.FoodItems {
+			if food != nil && newHead == food.Pos {
+				ateFoodIndex = i
+				g.Score += food.Points
+				if food.Effect != nil {
+					food.Effect(s) // Apply effect (which might call s.grow())
+				}
+				// Immediately try to spawn replacement
+				g.spawnFoodItem()
+				break
+			}
+		}
 
-	// Move player snake body
-	g.PlayerSnake.move()
+		// Update body: Prepend new head, potentially grow
+		if ateFoodIndex != -1 {
+			// Body grew inside food.Effect(), just prepend new head
+			// Need to ensure grow() updated both Body and PrevBody correctly
+			newBody := make([]Position, len(s.Body))
+			newBody[0] = newHead
+			copy(newBody[1:], s.Body[:len(s.Body)-1]) // Shift old body
+			s.Body = newBody
 
-	// Check player collisions after moving
-	hitWall, hitSelf := g.PlayerSnake.checkCollision(GridWidth, GridHeight)
-	if hitWall || hitSelf {
-		g.triggerGameOver("Player Collision")
-		return
-	}
+			// Remove eaten food *after* potential growth
+			g.FoodItems = append(g.FoodItems[:ateFoodIndex], g.FoodItems[ateFoodIndex+1:]...)
+		} else {
+			// No food eaten, normal move: Prepend new head, drop tail
+			newBody := make([]Position, len(s.Body))
+			newBody[0] = newHead
+			copy(newBody[1:], s.Body[:len(s.Body)-1])
+			s.Body = newBody
+		}
 
-	// Check collision with enemy snakes (Section 5.4)
-	if g.checkPlayerEnemyCollisions() {
-		return
+		// 2. Check Collisions (only after finalizing position)
+		hitWall, hitSelf := s.checkCollision(GridWidth, GridHeight)
+		if hitWall || hitSelf {
+			if s.IsPlayer {
+				g.triggerGameOver("Player Collision")
+			} else {
+				// TODO: Handle enemy death
+			}
+			return // Stop processing this snake if it died
+		}
+
+		// TODO: Check inter-snake collisions (Player vs Enemy, Enemy vs Enemy)
+		if s.IsPlayer && g.checkPlayerEnemyCollisions() {
+			return // Game Over handled in checkPlayerEnemyCollisions
+		}
+		// Add enemy collision checks here too
 	}
 }
+
+// updatePlayer is now removed, logic is in updateSnakeProgress
+/* func (g *Game) updatePlayer() { ... } */
 
 // updateEnemies handles AI snake movement and collision checks
 func (g *Game) updateEnemies() {
@@ -404,10 +421,6 @@ func (g *Game) checkPlayerEnemyCollisions() bool {
 func (g *Game) triggerGameOver(reason string) {
 	// TODO: Add reason handling if needed
 	g.IsOver = true
-	if g.MoveTicker != nil {
-		g.MoveTicker.Stop()
-	}
-	// Stop any active speed timers
 	if g.PlayerSnake != nil && g.PlayerSnake.SpeedTimer != nil {
 		g.PlayerSnake.SpeedTimer.Stop()
 	}
@@ -419,14 +432,14 @@ func (g *Game) TogglePause() {
 	g.IsPaused = !g.IsPaused
 	// TODO: Adjust ticker/timers when pausing/resuming
 	if g.IsPaused {
-		if g.MoveTicker != nil {
-			g.MoveTicker.Stop() // Stop movement ticker
+		if g.PlayerSnake != nil && g.PlayerSnake.SpeedTimer != nil {
+			g.PlayerSnake.SpeedTimer.Stop()
 		}
 		// TODO: Pause SpeedTimers if implemented precisely
 	} else {
 		// Resume: Reset ticker based on current speed
-		if g.MoveTicker != nil {
-			g.MoveTicker.Reset(time.Second / time.Duration(g.Speed*g.PlayerSnake.SpeedFactor))
+		if g.PlayerSnake != nil && g.PlayerSnake.SpeedTimer != nil {
+			g.PlayerSnake.SpeedTimer.Reset(time.Second / time.Duration(g.Speed*g.PlayerSnake.SpeedFactor))
 		}
 		// TODO: Resume SpeedTimers
 	}
@@ -461,7 +474,7 @@ func (g *Game) HandleInput(newDir Direction) {
 	}
 }
 
-// GetState provides necessary info for rendering
+// GetState provides necessary info for rendering, including progress
 type RenderableState struct {
 	PlayerSnake         *Snake
 	EnemySnakes         []*Snake

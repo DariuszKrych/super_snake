@@ -66,7 +66,11 @@ func (s *GameplayScene) Update(manager scene.ManagerInterface) (scene.Transition
 
 	// 2. Update Game Logic (if not paused)
 	if !s.gameData.IsPaused {
-		err := s.gameData.Update() // This updates snake movement, checks collisions, spawns food
+		// Calculate delta time (seconds since last frame)
+		// Ebitengine runs at 60 TPS (ticks per second) by default.
+		deltaTime := 1.0 / float64(ebiten.TPS())
+
+		err := s.gameData.Update(deltaTime) // Pass delta time
 		if err != nil {
 			return scene.Transition{}, err // Propagate errors
 		}
