@@ -1,10 +1,13 @@
 package render
 
 import (
+	"fmt"
 	"image/color"
 	"math"
+	"time" // Import time package
 
 	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 
 	"snake-game/internal/assets"
@@ -16,16 +19,19 @@ const (
 )
 
 var (
-	bgColor           = color.RGBA{R: 15, G: 15, B: 25, A: 255}    // Dark blue-ish background
-	gridColor         = color.RGBA{R: 50, G: 50, B: 70, A: 255}    // Faint grid lines
-	wallColor         = color.RGBA{R: 100, G: 100, B: 120, A: 255} // Color for boundaries
-	playerHeadColor   = color.RGBA{R: 0, G: 200, B: 50, A: 255}
-	playerBodyColor   = color.RGBA{R: 0, G: 255, B: 80, A: 255}
-	enemyHeadColor    = color.RGBA{R: 200, G: 50, B: 0, A: 255}  // Example enemy color
-	enemyBodyColor    = color.RGBA{R: 255, G: 80, B: 0, A: 255}  // Example enemy color
-	foodStandardColor = color.RGBA{R: 255, G: 0, B: 0, A: 255}   // Red
-	foodSpeedColor    = color.RGBA{R: 255, G: 165, B: 0, A: 255} // Orange
-	foodSlowColor     = color.RGBA{R: 0, G: 191, B: 255, A: 255} // Deep Sky Blue
+	bgColor            = color.RGBA{R: 15, G: 15, B: 25, A: 255}    // Dark blue-ish background
+	gridColor          = color.RGBA{R: 50, G: 50, B: 70, A: 255}    // Faint grid lines
+	wallColor          = color.RGBA{R: 100, G: 100, B: 120, A: 255} // Color for boundaries
+	playerHeadColor    = color.RGBA{R: 0, G: 200, B: 50, A: 255}
+	playerBodyColor    = color.RGBA{R: 0, G: 255, B: 80, A: 255}
+	enemyHeadColor     = color.RGBA{R: 200, G: 50, B: 0, A: 255}    // Example enemy color
+	enemyBodyColor     = color.RGBA{R: 255, G: 80, B: 0, A: 255}    // Example enemy color
+	foodStandardColor  = color.RGBA{R: 255, G: 0, B: 0, A: 255}     // Red
+	foodSpeedColor     = color.RGBA{R: 255, G: 165, B: 0, A: 255}   // Orange
+	foodSlowColor      = color.RGBA{R: 0, G: 191, B: 255, A: 255}   // Deep Sky Blue
+	foodFlashColor     = color.RGBA{R: 255, G: 255, B: 200, A: 180} // Pale yellow flash
+	speedUpColorShift  = color.RGBA{R: 255, G: 100, B: 100, A: 80}  // Reddish tint overlay
+	slowDownColorShift = color.RGBA{R: 100, G: 100, B: 255, A: 80}  // Bluish tint overlay
 )
 
 // DrawGame renders the entire game state using assets.
@@ -70,20 +76,24 @@ func DrawGame(screen *ebiten.Image, state game.RenderableState, assets *assets.M
 		}
 	}
 
-	// 5. Draw Enemy Snakes
+	// 5. Draw Effects (e.g., food flash) - Draw before snakes
+	drawEffects(screen, state)
+
+	// 6. Draw Enemy Snakes
 	for _, enemy := range state.EnemySnakes {
 		if enemy != nil {
+			// TODO: Pass effect state if enemies have speed effects
 			drawSnake(screen, *enemy, assets)
 		}
 	}
 
-	// 6. Draw Player Snake (drawn last to be on top)
+	// 7. Draw Player Snake (drawn last to be on top)
 	if state.PlayerSnake != nil {
 		drawSnake(screen, *state.PlayerSnake, assets)
 	}
 
 	// 7. Draw HUD (Score, etc.) - To be implemented later
-	// drawHUD(screen, state.Score, state.PlayerSpeedFactor, state.SpeedEffectDuration)
+	drawHUD(screen, state.Score)
 }
 
 // drawGrid draws faint grid lines (optional visual aid)
@@ -124,7 +134,7 @@ func drawWallRects(screen *ebiten.Image, gridW, gridH int) {
 	vector.DrawFilledRect(screen, w-thickness, 0, thickness, h, wallColor, false)
 }
 
-// drawSnake draws a single snake using sprites with interpolation.
+// drawSnake draws a single snake using sprites with interpolation and effects.
 func drawSnake(screen *ebiten.Image, s game.Snake, assets *assets.Manager) {
 	if len(s.Body) == 0 || len(s.PrevBody) == 0 || len(s.Body) != len(s.PrevBody) || assets.SnakeBody == nil || assets.SnakeHead == nil {
 		// log.Printf("DrawSnake skip: BodyLen=%d, PrevBodyLen=%d, BodyAsset=%v, HeadAsset=%v", len(s.Body), len(s.PrevBody), assets.SnakeBody, assets.SnakeHead)
@@ -140,95 +150,78 @@ func drawSnake(screen *ebiten.Image, s game.Snake, assets *assets.Manager) {
 		return a + (b-a)*t
 	}
 
-	// --- Draw Body ---
-	for i := 1; i < len(s.Body); i++ {
-		// Current logical position
-		segment := s.Body[i]
-		// Previous logical position
-		prevSegmentPos := s.PrevBody[i]
+	// Check for active speed effect
+	var speedEffectColor color.Color = nil
+	if !s.SpeedEffectEndTime.IsZero() && time.Now().Before(s.SpeedEffectEndTime) {
+		if s.SpeedFactor > 1.0 {
+			speedEffectColor = speedUpColorShift
+		} else if s.SpeedFactor < 1.0 {
+			speedEffectColor = slowDownColorShift
+		}
+	}
 
-		// Interpolated visual position
+	// Draw segments (Body and Head)
+	for i := 0; i < len(s.Body); i++ {
+		segment := s.Body[i]
+		prevSegmentPos := s.PrevBody[i]
 		visX := lerp(float64(prevSegmentPos.X), float64(segment.X), progress)
 		visY := lerp(float64(prevSegmentPos.Y), float64(segment.Y), progress)
 
-		// Segment in front of this one (for rotation reference)
-		segmentInFront := s.Body[i-1]
-		prevSegmentInFront := s.PrevBody[i-1]
-		// Interpolated position of the segment in front
-		visFrontX := lerp(float64(prevSegmentInFront.X), float64(segmentInFront.X), progress)
-		visFrontY := lerp(float64(prevSegmentInFront.Y), float64(segmentInFront.Y), progress)
-
+		var img *ebiten.Image
+		var imgW, imgH int
+		var angle float64 = 0
 		op := &ebiten.DrawImageOptions{}
-		// Center the sprite on the *interpolated* position
-		tx := visX*float64(GridCellSize) + float64(GridCellSize-bodyW)/2.0
-		ty := visY*float64(GridCellSize) + float64(GridCellSize-bodyH)/2.0
 
-		// --- Determine Body Rotation based on visual positions ---
-		var bodyAngle float64 = 0
-		dx := visFrontX - visX
-		dy := visFrontY - visY
-		if math.Abs(dx) < 0.01 { // Moving (close enough to) vertically
-			bodyAngle = math.Pi / 2 // Rotate 90 degrees
-		} else if math.Abs(dy) < 0.01 { // Moving (close enough to) horizontally
-			bodyAngle = 0
-		} else {
-			// Handle diagonal movement during turns - requires corner sprites or more complex logic
-			// For now, default to horizontal or vertical based on dominant axis, or use arctan
-			bodyAngle = math.Atan2(dy, dx)
-			// If using only straight sprites, snap angle to nearest 90 degrees
-			// bodyAngle = math.Round(bodyAngle / (math.Pi / 2)) * (math.Pi / 2)
+		if i == 0 { // Head
+			img = assets.SnakeHead
+			imgW, imgH = headW, headH // Already got size earlier
+			// Calculate head rotation based on logical direction
+			switch s.Direction {
+			case game.DirUp:
+				angle = -math.Pi / 2
+			case game.DirDown:
+				angle = math.Pi / 2
+			case game.DirLeft:
+				angle = math.Pi
+			case game.DirRight:
+				angle = 0
+			}
+		} else { // Body
+			img = assets.SnakeBody
+			imgW, imgH = bodyW, bodyH // Already got size earlier
+			// Calculate body rotation based on visual segment connection
+			segmentInFront := s.Body[i-1]
+			prevSegmentInFront := s.PrevBody[i-1]
+			visFrontX := lerp(float64(prevSegmentInFront.X), float64(segmentInFront.X), progress)
+			visFrontY := lerp(float64(prevSegmentInFront.Y), float64(segmentInFront.Y), progress)
+			dx := visFrontX - visX
+			dy := visFrontY - visY
+			if math.Abs(dx) < 0.01 {
+				angle = math.Pi / 2
+			} else if math.Abs(dy) < 0.01 {
+				angle = 0
+			} else {
+				angle = math.Atan2(dy, dx) /* Optional: Snap? */
+			}
 		}
 
-		// Apply rotation
-		// (Rotation logic might need refinement depending on the sprite asset)
-		centerX := float64(bodyW) / 2.0
-		centerY := float64(bodyH) / 2.0
-		op.GeoM.Translate(-centerX, -centerY) // Center rotation point
-		op.GeoM.Rotate(bodyAngle)
-		op.GeoM.Translate(centerX, centerY) // Move back
-
-		// Apply translation
+		// Common Drawing Logic
+		tx := visX*float64(GridCellSize) + float64(GridCellSize-imgW)/2.0
+		ty := visY*float64(GridCellSize) + float64(GridCellSize-imgH)/2.0
+		centerX := float64(imgW) / 2.0
+		centerY := float64(imgH) / 2.0
+		op.GeoM.Translate(-centerX, -centerY)
+		op.GeoM.Rotate(angle)
+		op.GeoM.Translate(centerX, centerY)
 		op.GeoM.Translate(tx, ty)
-		screen.DrawImage(assets.SnakeBody, op)
+
+		// Apply speed effect color modification if active
+		if speedEffectColor != nil {
+			op.ColorScale.ScaleWithColor(speedEffectColor) // Use ColorScale for tinting
+		}
+
+		screen.DrawImage(img, op)
 	}
-
-	// --- Draw Head ---
-	head := s.Body[0]
-	prevHead := s.PrevBody[0]
-	// Interpolated visual position
-	visX := lerp(float64(prevHead.X), float64(head.X), progress)
-	visY := lerp(float64(prevHead.Y), float64(head.Y), progress)
-
-	op := &ebiten.DrawImageOptions{}
-	// Center the sprite on the interpolated position
-	tx := visX*float64(GridCellSize) + float64(GridCellSize-headW)/2.0
-	ty := visY*float64(GridCellSize) + float64(GridCellSize-headH)/2.0
-
-	// Calculate rotation based on *current logical* direction (smoother than visual delta)
-	var angle float64
-	switch s.Direction {
-	case game.DirUp:
-		angle = -math.Pi / 2
-	case game.DirDown:
-		angle = math.Pi / 2
-	case game.DirLeft:
-		angle = math.Pi
-	case game.DirRight:
-		angle = 0
-	default:
-		angle = 0
-	}
-
-	// Apply rotation around the center of the sprite
-	centerX := float64(headW) / 2.0
-	centerY := float64(headH) / 2.0
-	op.GeoM.Translate(-centerX, -centerY)
-	op.GeoM.Rotate(angle)
-	op.GeoM.Translate(centerX, centerY)
-
-	// Apply translation to position the head
-	op.GeoM.Translate(tx, ty)
-	screen.DrawImage(assets.SnakeHead, op)
 }
 
 // drawFood draws a food item using sprites.
@@ -259,5 +252,30 @@ func drawFood(screen *ebiten.Image, f game.Food, assets *assets.Manager) {
 	screen.DrawImage(img, op)
 }
 
-// TODO: drawHUD function
-// func drawHUD(screen *ebiten.Image, score int, speedFactor float64, effectDuration time.Duration) { ... }
+// drawEffects renders transient visual effects.
+func drawEffects(screen *ebiten.Image, state game.RenderableState) {
+	// Food Eaten Flash - REMOVED
+	/*
+		if state.FoodEatenPos != nil {
+			// Simple square flash effect
+			fx := float32(state.FoodEatenPos.X * GridCellSize)
+			fy := float32(state.FoodEatenPos.Y * GridCellSize)
+			size := float32(GridCellSize) // Flash covers the cell
+			vector.DrawFilledRect(screen, fx, fy, size, size, foodFlashColor, false)
+		}
+	*/
+
+	// TODO: Add spawning effects
+	// TODO: Add collision effects
+}
+
+// drawHUD function renders the Heads-Up Display (Score, etc.)
+func drawHUD(screen *ebiten.Image, score int /*, other hud data */) {
+	scoreStr := fmt.Sprintf("Score: %d", score)
+
+	// Simple text rendering at top-left. Improve with fonts later.
+	// Use ebitenutil which we should have imported.
+	ebitenutil.DebugPrintAt(screen, scoreStr, 10, 10)
+
+	// TODO: Add rendering for speed effect duration if needed
+}

@@ -1,10 +1,12 @@
 package gameplay
 
 import (
+	"image/color"
 	"log"
 
 	"snake-game/internal/game"
 	"snake-game/internal/input"
+	"snake-game/internal/particle"
 	"snake-game/internal/render"
 	"snake-game/internal/scene"
 
@@ -14,25 +16,29 @@ import (
 
 // GameplayScene holds the state for the main gameplay.
 type GameplayScene struct {
-	gameData *game.Game
-	inputMgr *input.Manager
-	sceneMgr scene.ManagerInterface
+	gameData    *game.Game
+	inputMgr    *input.Manager
+	sceneMgr    scene.ManagerInterface
+	particleSys *particle.System
 	// Add specific rendering assets or state if needed
 }
 
 // NewGameplayScene creates a new gameplay scene instance.
 func NewGameplayScene() *GameplayScene {
-	return &GameplayScene{}
+	ps := particle.NewSystem(0)
+	return &GameplayScene{
+		particleSys: ps,
+	}
 }
 
 // Load initializes the scene.
 func (s *GameplayScene) Load(manager scene.ManagerInterface, gameData *game.Game) {
 	log.Println("Loading Gameplay Scene")
 	s.sceneMgr = manager
-	s.inputMgr = manager.GetInputManager() // Get shared input manager
+	s.inputMgr = manager.GetInputManager()
 	s.gameData = gameData
-	// Reset game state if necessary when loading gameplay
 	s.gameData.Reset()
+	s.particleSys.Particles = s.particleSys.Particles[:0]
 	// Load gameplay-specific assets here (e.g., sounds)
 }
 
@@ -49,36 +55,53 @@ func (s *GameplayScene) Update(manager scene.ManagerInterface) (scene.Transition
 	dir, action := s.inputMgr.Update()
 
 	if dir != game.DirNone {
-		s.gameData.HandleInput(dir) // Update player's intended direction
+		s.gameData.HandleInput(dir)
 	}
 
 	switch action {
 	case input.ActionPause:
-		s.gameData.TogglePause() // Toggle pause state in game logic
-		// Optionally, transition to a PauseScene
-		// return scene.Transition{FromScene: scene.SceneTypeGameplay, ToScene: scene.SceneTypePause}, nil
+		s.gameData.TogglePause()
 	case input.ActionConfirm:
-		// Maybe used for something else in gameplay?
 	case input.ActionRestart:
-		// Maybe add a dedicated restart key
 		s.gameData.Reset()
+		s.particleSys.Particles = s.particleSys.Particles[:0]
 	}
+
+	// Update particle system
+	deltaTime := 1.0 / float64(ebiten.TPS())
+	s.particleSys.Update(deltaTime)
 
 	// 2. Update Game Logic (if not paused)
 	if !s.gameData.IsPaused {
-		// Calculate delta time (seconds since last frame)
-		// Ebitengine runs at 60 TPS (ticks per second) by default.
-		deltaTime := 1.0 / float64(ebiten.TPS())
-
-		err := s.gameData.Update(deltaTime) // Pass delta time
+		err := s.gameData.Update(deltaTime)
 		if err != nil {
-			return scene.Transition{}, err // Propagate errors
+			return scene.Transition{}, err
+		}
+
+		lastEatenPos := s.gameData.FoodEatenPos
+		if lastEatenPos != nil {
+			flashColor := color.RGBA{R: 255, G: 255, B: 180, A: 255}
+
+			centerX := float64(lastEatenPos.X*render.GridCellSize) + float64(render.GridCellSize)/2.0
+			centerY := float64(lastEatenPos.Y*render.GridCellSize) + float64(render.GridCellSize)/2.0
+			s.particleSys.Emit(particle.EmitConfig{
+				X:              centerX,
+				Y:              centerY,
+				Count:          15,
+				UseGravity:     false,
+				Color:          flashColor,
+				VelocitySpread: 80,
+				MinLifetime:    0.2,
+				MaxLifetime:    0.5,
+				MinSize:        1,
+				MaxSize:        3,
+			})
+			s.gameData.FoodEatenPos = nil
 		}
 	}
 
 	// 3. Check for Game Over state change
 	if s.gameData.IsOver {
-		// Transition to GameOver scene
 		return scene.Transition{FromScene: scene.SceneTypeGameplay, ToScene: scene.SceneTypeGameOver}, nil
 	}
 
@@ -96,9 +119,11 @@ func (s *GameplayScene) Draw(screen *ebiten.Image) {
 	// Use the render package to draw everything, passing assets
 	render.DrawGame(screen, renderState, assets)
 
+	// Draw particles on top
+	s.particleSys.Draw(screen)
+
 	// Draw Pause overlay if paused
 	if s.gameData.IsPaused {
-		// TODO: Implement a nicer pause overlay
 		width, height := s.sceneMgr.GetWindowSize()
 		ebitenutil.DebugPrintAt(screen, "PAUSED (Press P/Esc to Resume)", width/2-100, height/2)
 	}

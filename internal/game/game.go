@@ -19,6 +19,7 @@ const (
 	InitialFoodItems  = 3               // Start with this many food items
 	MaxTotalFoodItems = 50              // Maximum food items on screen
 	FoodSpawnInterval = 5 * time.Second // Time between new food spawns
+	foodFlashDuration = 150 * time.Millisecond
 )
 
 // --- Types ---
@@ -41,14 +42,15 @@ type Position struct {
 
 // Snake struct holds state for a single snake (player or AI)
 type Snake struct {
-	Body         []Position
-	PrevBody     []Position // Stores body positions from the *previous completed* move step
-	Direction    Direction
-	NextDir      Direction   // Buffer for next direction input
-	SpeedFactor  float64     // Multiplier for speed (1.0 = normal, >1 = faster, <1 = slower)
-	SpeedTimer   *time.Timer // Timer for temporary speed effects
-	IsPlayer     bool        // Flag to distinguish player snake
-	MoveProgress float64     // How far into the current grid move (0.0 to 1.0)
+	Body               []Position
+	PrevBody           []Position // Stores body positions from the *previous completed* move step
+	Direction          Direction
+	NextDir            Direction   // Buffer for next direction input
+	SpeedFactor        float64     // Multiplier for speed (1.0 = normal, >1 = faster, <1 = slower)
+	SpeedTimer         *time.Timer // Timer for temporary speed effects
+	SpeedEffectEndTime time.Time   // Track when the speed boost ends
+	IsPlayer           bool        // Flag to distinguish player snake
+	MoveProgress       float64     // How far into the current grid move (0.0 to 1.0)
 	// Add other snake-specific properties if needed (e.g., color for rendering)
 }
 
@@ -81,6 +83,8 @@ type Game struct {
 	IsOver            bool
 	IsPaused          bool
 	nextFoodSpawnTime time.Time // When the next food item should appear
+	FoodEatenPos      *Position // Position where food was last eaten
+	FoodEatenTime     time.Time // Time when food was last eaten
 }
 
 // --- Game Initialization ---
@@ -106,13 +110,14 @@ func (g *Game) Reset() {
 		prevBody[i] = pos // Initially, previous position is the same
 	}
 	g.PlayerSnake = &Snake{
-		Body:         initialBody,
-		PrevBody:     prevBody,
-		Direction:    DirRight,
-		NextDir:      DirRight,
-		SpeedFactor:  1.0,
-		IsPlayer:     true,
-		MoveProgress: 0.0, // Start not moving
+		Body:               initialBody,
+		PrevBody:           prevBody,
+		Direction:          DirRight,
+		NextDir:            DirRight,
+		SpeedFactor:        1.0,
+		SpeedEffectEndTime: time.Time{}, // Ensure effect time is zeroed
+		IsPlayer:           true,
+		MoveProgress:       0.0, // Start not moving
 	}
 
 	// TODO: Initialize Enemy Snakes (Section 5.4)
@@ -123,6 +128,8 @@ func (g *Game) Reset() {
 	g.IsOver = false
 	g.IsPaused = false
 	g.FoodItems = g.FoodItems[:0] // Clear existing food
+	g.FoodEatenPos = nil          // Reset food eaten effect tracker
+	g.FoodEatenTime = time.Time{}
 
 	// Spawn initial food items
 	for i := 0; i < InitialFoodItems; i++ {
@@ -249,9 +256,12 @@ func (s *Snake) applySpeedBoost(factor float64, duration time.Duration) {
 		s.SpeedTimer.Stop()
 	}
 	s.SpeedFactor = factor
+	endTime := time.Now().Add(duration) // Calculate end time
+	s.SpeedEffectEndTime = endTime      // Store end time
 	s.SpeedTimer = time.AfterFunc(duration, func() {
 		s.SpeedFactor = 1.0
 		s.SpeedTimer = nil
+		s.SpeedEffectEndTime = time.Time{} // Reset end time
 	})
 }
 
@@ -353,6 +363,12 @@ func (g *Game) updateSnakeProgress(s *Snake, deltaTime float64) {
 				}
 				// Immediately try to spawn replacement
 				g.spawnFoodItem()
+
+				// Trigger food eaten effect
+				pos := food.Pos // Copy position
+				g.FoodEatenPos = &pos
+				g.FoodEatenTime = time.Now()
+
 				break
 			}
 		}
@@ -486,6 +502,8 @@ type RenderableState struct {
 	GridHeight          int
 	PlayerSpeedFactor   float64
 	SpeedEffectDuration time.Duration
+	FoodEatenPos        *Position
+	FoodEatenTime       time.Time
 }
 
 func (g *Game) GetState() RenderableState {
@@ -501,6 +519,11 @@ func (g *Game) GetState() RenderableState {
 		speedFactor = playerSnakeCopy.SpeedFactor
 	}
 
+	// Clear food eaten effect if duration passed
+	if g.FoodEatenPos != nil && time.Since(g.FoodEatenTime) > foodFlashDuration {
+		g.FoodEatenPos = nil
+	}
+
 	return RenderableState{
 		PlayerSnake:         playerSnakeCopy,
 		EnemySnakes:         g.EnemySnakes,
@@ -512,5 +535,7 @@ func (g *Game) GetState() RenderableState {
 		GridHeight:          GridHeight,
 		PlayerSpeedFactor:   speedFactor,
 		SpeedEffectDuration: remainingDuration,
+		FoodEatenPos:        g.FoodEatenPos,
+		FoodEatenTime:       g.FoodEatenTime,
 	}
 }
