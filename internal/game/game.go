@@ -1,6 +1,7 @@
 package game
 
 import (
+	"log"
 	"math/rand"
 	"time"
 	// Import log for debugging if needed
@@ -10,16 +11,19 @@ import (
 // --- Constants ---
 
 const (
-	GridWidth         = 40
-	GridHeight        = 30
-	InitialSpeed      = 8 // Grid cells per second
-	SpeedIncrement    = 0.5
-	MaxSpeed          = 20
-	InitialSnakeLen   = 3
-	InitialFoodItems  = 3               // Start with this many food items
-	MaxTotalFoodItems = 50              // Maximum food items on screen
-	FoodSpawnInterval = 5 * time.Second // Time between new food spawns
-	foodFlashDuration = 150 * time.Millisecond
+	GridWidth          = 40
+	GridHeight         = 30
+	InitialSpeed       = 8 // Grid cells per second
+	SpeedIncrement     = 0.5
+	MaxSpeed           = 20
+	InitialSnakeLen    = 3
+	InitialFoodItems   = 3                // Start with this many food items
+	MaxTotalFoodItems  = 50               // Maximum food items on screen
+	FoodSpawnInterval  = 5 * time.Second  // Time between new food spawns
+	NumEnemySnakes     = 2                // Initial number of enemies
+	MaxEnemySnakes     = 3                // Maximum number of enemies allowed
+	EnemySpawnInterval = 15 * time.Second // Time between trying to spawn new enemies
+	foodFlashDuration  = 150 * time.Millisecond
 )
 
 // --- Types ---
@@ -75,16 +79,18 @@ type Food struct {
 
 // Game struct holds the entire game state
 type Game struct {
-	PlayerSnake       *Snake
-	EnemySnakes       []*Snake
-	FoodItems         []*Food
-	Score             int
-	Speed             float64 // Base grid cells per second for player
-	IsOver            bool
-	IsPaused          bool
-	nextFoodSpawnTime time.Time // When the next food item should appear
-	FoodEatenPos      *Position // Position where food was last eaten
-	FoodEatenTime     time.Time // Time when food was last eaten
+	PlayerSnake        *Snake
+	EnemySnakes        []*Snake
+	FoodItems          []*Food
+	Score              int
+	Speed              float64 // Base grid cells per second for player
+	IsOver             bool
+	IsPaused           bool
+	nextFoodSpawnTime  time.Time // When the next food item should appear
+	nextEnemySpawnTime time.Time // When to next check for enemy spawning
+	FoodEatenPos       *Position // Position where food was last eaten
+	FoodEatenTime      time.Time // Time when food was last eaten
+	EnemyFoodEatenPos  *Position // Position where an enemy last ate food
 }
 
 // --- Game Initialization ---
@@ -101,13 +107,17 @@ func NewGame() *Game {
 
 // Reset initializes or resets the game state for a new round
 func (g *Game) Reset() {
-	startX, startY := GridWidth/2, GridHeight/2
+	occupied := make(map[Position]bool) // Track occupied spots during init
+
+	// Initialize player snake
+	startX, startY := GridWidth/4, GridHeight/2 // Start player on left side
 	initialBody := make([]Position, InitialSnakeLen)
 	prevBody := make([]Position, InitialSnakeLen)
 	for i := 0; i < InitialSnakeLen; i++ {
 		pos := Position{X: startX - i, Y: startY}
 		initialBody[i] = pos
-		prevBody[i] = pos // Initially, previous position is the same
+		prevBody[i] = pos
+		occupied[pos] = true
 	}
 	g.PlayerSnake = &Snake{
 		Body:               initialBody,
@@ -115,13 +125,22 @@ func (g *Game) Reset() {
 		Direction:          DirRight,
 		NextDir:            DirRight,
 		SpeedFactor:        1.0,
-		SpeedEffectEndTime: time.Time{}, // Ensure effect time is zeroed
+		SpeedEffectEndTime: time.Time{},
 		IsPlayer:           true,
-		MoveProgress:       0.0, // Start not moving
+		MoveProgress:       0.0,
 	}
 
-	// TODO: Initialize Enemy Snakes (Section 5.4)
-	g.EnemySnakes = []*Snake{} // Empty for now
+	// Initialize Enemies
+	g.EnemySnakes = make([]*Snake, 0, MaxEnemySnakes) // Use Max for capacity
+	for i := 0; i < NumEnemySnakes; i++ {             // Start with initial number
+		enemy := g.createEnemy(occupied)
+		if enemy != nil {
+			g.EnemySnakes = append(g.EnemySnakes, enemy)
+			for _, seg := range enemy.Body {
+				occupied[seg] = true
+			}
+		}
+	}
 
 	g.Score = 0
 	g.Speed = InitialSpeed
@@ -130,14 +149,64 @@ func (g *Game) Reset() {
 	g.FoodItems = g.FoodItems[:0] // Clear existing food
 	g.FoodEatenPos = nil          // Reset food eaten effect tracker
 	g.FoodEatenTime = time.Time{}
+	g.EnemyFoodEatenPos = nil // Reset enemy food effect tracker
 
-	// Spawn initial food items
+	// Spawn initial food items (avoiding snakes)
 	for i := 0; i < InitialFoodItems; i++ {
 		g.spawnFoodItem()
 	}
 
-	// Schedule the next timed spawn
 	g.scheduleNextFoodSpawn()
+	g.scheduleNextEnemySpawn() // Schedule first enemy spawn check
+}
+
+// createEnemy initializes a single enemy snake at a valid position.
+func (g *Game) createEnemy(occupied map[Position]bool) *Snake {
+	attempts := 0
+	maxAttempts := (GridWidth * GridHeight) / 2 // Limit attempts
+
+	for attempts < maxAttempts {
+		// Try placing on the right side initially
+		startX := GridWidth - GridWidth/4 + rand.Intn(GridWidth/4)
+		startY := rand.Intn(GridHeight)
+		startDir := DirLeft // Start moving left
+
+		// Check if start position + initial body is clear
+		validPlacement := true
+		tempBody := make([]Position, InitialSnakeLen)
+		for i := 0; i < InitialSnakeLen; i++ {
+			// Calculate initial body based on startDir (simplified: assumes left)
+			pos := Position{X: startX + i, Y: startY}
+			if occupied[pos] || pos.X >= GridWidth || pos.X < 0 || pos.Y >= GridHeight || pos.Y < 0 {
+				validPlacement = false
+				break
+			}
+			tempBody[i] = pos
+		}
+
+		if validPlacement {
+			initialBody := make([]Position, InitialSnakeLen)
+			prevBody := make([]Position, InitialSnakeLen)
+			for i := 0; i < InitialSnakeLen; i++ {
+				pos := Position{X: startX + i, Y: startY}
+				initialBody[i] = pos
+				prevBody[i] = pos
+			}
+			return &Snake{
+				Body:               initialBody,
+				PrevBody:           prevBody,
+				Direction:          startDir,
+				NextDir:            startDir,
+				SpeedFactor:        1.0, // Enemies move at base speed for now
+				SpeedEffectEndTime: time.Time{},
+				IsPlayer:           false,
+				MoveProgress:       0.0,
+			}
+		}
+		attempts++
+	}
+	log.Printf("Warning: Could not place enemy snake after %d attempts", maxAttempts)
+	return nil // Failed to place enemy
 }
 
 // --- Food Logic ---
@@ -149,23 +218,27 @@ func (g *Game) scheduleNextFoodSpawn() {
 	g.nextFoodSpawnTime = time.Now().Add(interval)
 }
 
+// scheduleNextEnemySpawn sets the time for the next enemy spawn check.
+func (g *Game) scheduleNextEnemySpawn() {
+	g.nextEnemySpawnTime = time.Now().Add(EnemySpawnInterval)
+}
+
 // spawnFoodItem places a *single* food item randomly, avoiding obstacles.
 func (g *Game) spawnFoodItem() {
-	// Check if maximum food limit is reached
 	if len(g.FoodItems) >= MaxTotalFoodItems {
 		return
 	}
-
 	occupied := make(map[Position]bool)
+	// Populate occupied map (include player AND enemies)
 	if g.PlayerSnake != nil {
-		for _, segment := range g.PlayerSnake.Body {
-			occupied[segment] = true
+		for _, seg := range g.PlayerSnake.Body {
+			occupied[seg] = true
 		}
 	}
 	for _, enemy := range g.EnemySnakes {
 		if enemy != nil {
-			for _, segment := range enemy.Body {
-				occupied[segment] = true
+			for _, seg := range enemy.Body {
+				occupied[seg] = true
 			}
 		}
 	}
@@ -291,7 +364,7 @@ func (s *Snake) checkCollision(width, height int) (hitWall bool, hitSelf bool) {
 // --- Game Update Logic ---
 
 // Update proceeds the game state by one frame
-func (g *Game) Update(deltaTime float64) error { // Accept delta time
+func (g *Game) Update(deltaTime float64) error {
 	if g.IsOver || g.IsPaused {
 		return nil
 	}
@@ -302,17 +375,93 @@ func (g *Game) Update(deltaTime float64) error { // Accept delta time
 		g.scheduleNextFoodSpawn()
 	}
 
+	// Check timed enemy spawning
+	if time.Now().After(g.nextEnemySpawnTime) {
+		g.spawnEnemyIfPossible()
+		g.scheduleNextEnemySpawn() // Schedule next check regardless of success
+	}
+
 	// Update Player Snake Movement Progress
 	if g.PlayerSnake != nil {
 		g.updateSnakeProgress(g.PlayerSnake, deltaTime)
+		if g.IsOver {
+			return nil // Stop updates if player died this frame
+		}
 	}
 
-	// TODO: Update Enemy AI Movement Progress
-	// for _, enemy := range g.EnemySnakes {
-	// 	g.updateSnakeProgress(enemy, deltaTime)
-	// }
+	// Update Enemy AI Movement Progress
+	// Iterate backwards for safe removal
+	for i := len(g.EnemySnakes) - 1; i >= 0; i-- {
+		enemy := g.EnemySnakes[i]
+		if enemy != nil {
+			g.updateEnemyAI(enemy) // Determine NextDir for enemy
+			g.updateSnakeProgress(enemy, deltaTime)
+			if g.IsOver {
+				return nil // Stop if player died colliding with this enemy
+			}
+		}
+	}
 
 	return nil
+}
+
+// updateEnemyAI sets the NextDir for an enemy snake (placeholder logic).
+func (g *Game) updateEnemyAI(s *Snake) {
+	// Very basic AI: Try to move towards the first food item.
+	// Does not avoid obstacles yet!
+	if len(g.FoodItems) > 0 && g.FoodItems[0] != nil {
+		target := g.FoodItems[0].Pos
+		head := s.Body[0]
+		currentDir := s.Direction
+
+		// Determine desired direction (simplified)
+		var desiredDir Direction
+		if target.X > head.X && currentDir != DirLeft {
+			desiredDir = DirRight
+		} else if target.X < head.X && currentDir != DirRight {
+			desiredDir = DirLeft
+		} else if target.Y > head.Y && currentDir != DirUp {
+			desiredDir = DirDown
+		} else if target.Y < head.Y && currentDir != DirDown {
+			desiredDir = DirUp
+		} else {
+			// If already aligned on one axis, move on the other, or keep current
+			if target.Y != head.Y && currentDir != DirUp && currentDir != DirDown {
+				if target.Y > head.Y {
+					desiredDir = DirDown
+				} else {
+					desiredDir = DirUp
+				}
+			} else if target.X != head.X && currentDir != DirLeft && currentDir != DirRight {
+				if target.X > head.X {
+					desiredDir = DirRight
+				} else {
+					desiredDir = DirLeft
+				}
+			} else {
+				desiredDir = currentDir // Keep going if blocked or unsure
+			}
+		}
+
+		// Basic anti-reversal check
+		if (desiredDir == DirUp && currentDir == DirDown) ||
+			(desiredDir == DirDown && currentDir == DirUp) ||
+			(desiredDir == DirLeft && currentDir == DirRight) ||
+			(desiredDir == DirRight && currentDir == DirLeft) {
+			// If desired move is direct reverse, try to turn perpendicular instead (simple avoidance)
+			if currentDir == DirUp || currentDir == DirDown {
+				desiredDir = DirLeft
+			} else {
+				desiredDir = DirUp
+			}
+			// TODO: Need better obstacle check here
+		}
+
+		s.NextDir = desiredDir
+	} else {
+		// No food? Move randomly or keep going (for now, keep going)
+		s.NextDir = s.Direction
+	}
 }
 
 // updateSnakeProgress handles movement progress and finalization for a single snake
@@ -357,7 +506,9 @@ func (g *Game) updateSnakeProgress(s *Snake, deltaTime float64) {
 		for i, food := range g.FoodItems {
 			if food != nil && newHead == food.Pos {
 				ateFoodIndex = i
-				g.Score += food.Points
+				if s.IsPlayer {
+					g.Score += food.Points
+				}
 				if food.Effect != nil {
 					food.Effect(s) // Apply effect (which might call s.grow())
 				}
@@ -366,8 +517,12 @@ func (g *Game) updateSnakeProgress(s *Snake, deltaTime float64) {
 
 				// Trigger food eaten effect
 				pos := food.Pos // Copy position
-				g.FoodEatenPos = &pos
-				g.FoodEatenTime = time.Now()
+				if s.IsPlayer {
+					g.FoodEatenPos = &pos
+					g.FoodEatenTime = time.Now()
+				} else {
+					g.EnemyFoodEatenPos = &pos // Set enemy signal
+				}
 
 				break
 			}
@@ -396,41 +551,114 @@ func (g *Game) updateSnakeProgress(s *Snake, deltaTime float64) {
 		hitWall, hitSelf := s.checkCollision(GridWidth, GridHeight)
 		if hitWall || hitSelf {
 			if s.IsPlayer {
-				g.triggerGameOver("Player Collision")
+				g.triggerGameOver("Player Self/Wall Collision")
 			} else {
-				// TODO: Handle enemy death
+				g.removeEnemySnake(s) // Remove enemy on collision
 			}
 			return // Stop processing this snake if it died
 		}
 
-		// TODO: Check inter-snake collisions (Player vs Enemy, Enemy vs Enemy)
-		if s.IsPlayer && g.checkPlayerEnemyCollisions() {
-			return // Game Over handled in checkPlayerEnemyCollisions
+		// Check Inter-snake Collisions
+		if g.checkInterSnakeCollisions(s) {
+			// If this snake died or caused player game over, stop processing it.
+			if g.IsOver || !g.isSnakeAlive(s) {
+				return
+			}
 		}
-		// Add enemy collision checks here too
 	}
 }
 
-// updatePlayer is now removed, logic is in updateSnakeProgress
-/* func (g *Game) updatePlayer() { ... } */
-
-// updateEnemies handles AI snake movement and collision checks
-func (g *Game) updateEnemies() {
-	// TODO: Implement AI update loop (Section 5.4)
-	// - Get AI input/decision (pathfinding, avoidance)
-	// - Move AI snakes
-	// - Check AI collisions (wall, self, other AI, player body)
-	// - Handle AI eating food
-	// - Remove dead AI snakes
+// isSnakeAlive checks if a given snake pointer still exists in the EnemySnakes slice.
+// Used after collision checks to see if the snake was removed.
+func (g *Game) isSnakeAlive(snake *Snake) bool {
+	if snake.IsPlayer {
+		return true // Player handled by g.IsOver
+	}
+	for _, enemy := range g.EnemySnakes {
+		if enemy == snake {
+			return true
+		}
+	}
+	return false
 }
 
-// checkPlayerEnemyCollisions handles interactions between player and enemies
-func (g *Game) checkPlayerEnemyCollisions() bool {
-	// TODO: Implement player vs enemy collision logic (Section 5.4)
-	// - Player head vs Enemy body -> Player dies
-	// - Player head vs Enemy head -> Both die (Player game over)
-	// - Enemy head vs Player body -> Enemy dies
-	return false // Placeholder
+// checkInterSnakeCollisions checks collisions between the given snake `s` and all other snakes.
+// Returns true if a collision occurred that requires stopping processing for `s`.
+func (g *Game) checkInterSnakeCollisions(s *Snake) bool {
+	if len(s.Body) == 0 {
+		return false
+	}
+	head := s.Body[0]
+
+	// Check against player if `s` is an enemy
+	if !s.IsPlayer && g.PlayerSnake != nil && len(g.PlayerSnake.Body) > 0 {
+		playerHead := g.PlayerSnake.Body[0]
+		// Head-on check
+		if head == playerHead {
+			g.triggerGameOver("Enemy Head-on Collision")
+			g.removeEnemySnake(s)
+			return true // Player game over, stop processing enemy
+		}
+		// Check if enemy head hit player body
+		for i := 1; i < len(g.PlayerSnake.Body); i++ {
+			if head == g.PlayerSnake.Body[i] {
+				g.removeEnemySnake(s)
+				// TODO: Award points?
+				return true // Enemy died, stop processing it
+			}
+		}
+	}
+
+	// Check against enemies
+	for _, other := range g.EnemySnakes {
+		if s == other || other == nil || len(other.Body) == 0 {
+			continue // Skip self and dead enemies
+		}
+		otherHead := other.Body[0]
+
+		// Head-on check (Enemy vs Enemy or Player vs Enemy)
+		if head == otherHead {
+			if s.IsPlayer {
+				g.triggerGameOver("Player Head-on Collision")
+				g.removeEnemySnake(other)
+				return true // Player game over
+			} else {
+				// Both enemies die
+				g.removeEnemySnake(s)
+				g.removeEnemySnake(other)
+				return true // Current enemy `s` died
+			}
+		}
+
+		// Check if `s` head hit `other` body
+		for i := 1; i < len(other.Body); i++ {
+			if head == other.Body[i] {
+				if s.IsPlayer {
+					g.triggerGameOver("Player Hit Enemy Body")
+					return true // Player game over
+				} else {
+					// Enemy hit another enemy's body
+					g.removeEnemySnake(s)
+					return true // Current enemy `s` died
+				}
+			}
+		}
+	}
+	return false // No relevant collision found for `s`
+}
+
+// removeEnemySnake removes a specific enemy snake from the game slice.
+func (g *Game) removeEnemySnake(snakeToRemove *Snake) {
+	newEnemyList := g.EnemySnakes[:0]
+	for _, s := range g.EnemySnakes {
+		if s != snakeToRemove {
+			newEnemyList = append(newEnemyList, s)
+		} else {
+			log.Printf("Enemy snake removed due to collision.")
+			// TODO: Trigger enemy death effect/sound
+		}
+	}
+	g.EnemySnakes = newEnemyList
 }
 
 // triggerGameOver sets the game over state
@@ -504,6 +732,7 @@ type RenderableState struct {
 	SpeedEffectDuration time.Duration
 	FoodEatenPos        *Position
 	FoodEatenTime       time.Time
+	EnemyFoodEatenPos   *Position
 }
 
 func (g *Game) GetState() RenderableState {
@@ -519,7 +748,7 @@ func (g *Game) GetState() RenderableState {
 		speedFactor = playerSnakeCopy.SpeedFactor
 	}
 
-	// Clear food eaten effect if duration passed
+	// Clear player food eaten effect if duration passed
 	if g.FoodEatenPos != nil && time.Since(g.FoodEatenTime) > foodFlashDuration {
 		g.FoodEatenPos = nil
 	}
@@ -537,5 +766,40 @@ func (g *Game) GetState() RenderableState {
 		SpeedEffectDuration: remainingDuration,
 		FoodEatenPos:        g.FoodEatenPos,
 		FoodEatenTime:       g.FoodEatenTime,
+		EnemyFoodEatenPos:   g.EnemyFoodEatenPos,
+	}
+}
+
+// spawnEnemyIfPossible attempts to add a new enemy if below the max count.
+func (g *Game) spawnEnemyIfPossible() {
+	if len(g.EnemySnakes) < MaxEnemySnakes {
+		log.Printf("Attempting to spawn new enemy snake (current: %d)", len(g.EnemySnakes))
+		// Need to gather all currently occupied positions
+		occupied := make(map[Position]bool)
+		if g.PlayerSnake != nil {
+			for _, seg := range g.PlayerSnake.Body {
+				occupied[seg] = true
+			}
+		}
+		for _, enemy := range g.EnemySnakes {
+			if enemy != nil {
+				for _, seg := range enemy.Body {
+					occupied[seg] = true
+				}
+			}
+		}
+		for _, food := range g.FoodItems {
+			if food != nil {
+				occupied[food.Pos] = true
+			}
+		}
+
+		newEnemy := g.createEnemy(occupied)
+		if newEnemy != nil {
+			g.EnemySnakes = append(g.EnemySnakes, newEnemy)
+			log.Printf("New enemy snake spawned (total: %d)", len(g.EnemySnakes))
+		} else {
+			log.Printf("Failed to spawn new enemy snake (could not find placement).")
+		}
 	}
 }

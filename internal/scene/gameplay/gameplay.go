@@ -78,12 +78,12 @@ func (s *GameplayScene) Update(manager scene.ManagerInterface) (scene.Transition
 			return scene.Transition{}, err
 		}
 
-		lastEatenPos := s.gameData.FoodEatenPos
-		if lastEatenPos != nil {
+		// Check if food was eaten by PLAYER
+		lastPlayerEatenPos := s.gameData.FoodEatenPos
+		if lastPlayerEatenPos != nil {
 			flashColor := color.RGBA{R: 255, G: 255, B: 180, A: 255}
-
-			centerX := float64(lastEatenPos.X*render.GridCellSize) + float64(render.GridCellSize)/2.0
-			centerY := float64(lastEatenPos.Y*render.GridCellSize) + float64(render.GridCellSize)/2.0
+			centerX := float64(lastPlayerEatenPos.X*render.GridCellSize) + float64(render.GridCellSize)/2.0
+			centerY := float64(lastPlayerEatenPos.Y*render.GridCellSize) + float64(render.GridCellSize)/2.0
 			s.particleSys.Emit(particle.EmitConfig{
 				X:              centerX,
 				Y:              centerY,
@@ -96,7 +96,28 @@ func (s *GameplayScene) Update(manager scene.ManagerInterface) (scene.Transition
 				MinSize:        1,
 				MaxSize:        3,
 			})
-			s.gameData.FoodEatenPos = nil
+			// s.gameData.FoodEatenPos = nil // Game logic now clears this based on time
+		}
+
+		// Check if food was eaten by ENEMY
+		lastEnemyEatenPos := s.gameData.EnemyFoodEatenPos
+		if lastEnemyEatenPos != nil {
+			flashColor := color.RGBA{R: 255, G: 180, B: 180, A: 255} // Different color for enemy eat
+			centerX := float64(lastEnemyEatenPos.X*render.GridCellSize) + float64(render.GridCellSize)/2.0
+			centerY := float64(lastEnemyEatenPos.Y*render.GridCellSize) + float64(render.GridCellSize)/2.0
+			s.particleSys.Emit(particle.EmitConfig{
+				X:              centerX,
+				Y:              centerY,
+				Count:          10, // Fewer particles for enemy?
+				UseGravity:     false,
+				Color:          flashColor,
+				VelocitySpread: 60,
+				MinLifetime:    0.15,
+				MaxLifetime:    0.4,
+				MinSize:        1,
+				MaxSize:        2,
+			})
+			s.gameData.EnemyFoodEatenPos = nil // Consume the event signal here
 		}
 	}
 
